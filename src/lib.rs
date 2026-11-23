@@ -128,6 +128,12 @@ impl Decision {
     pub fn is_allowed(&self) -> bool {
         matches!(self, Decision::Allow)
     }
+
+    /// 和 `is_allowed` 互为补集，但故意不含 `Ask`：
+    /// 「拒绝」和「需要人确认」是两件事，混用会让排查时分不清是谁拦的。
+    pub fn is_denied(&self) -> bool {
+        matches!(self, Decision::Deny(_))
+    }
 }
 
 /// 可逆性分级：决定出现异常时该不该自动重试、该不该通知人。
@@ -331,6 +337,7 @@ fn within(path: &Path, roots: &[PathBuf]) -> bool {
 }
 
 pub mod audit;
+pub mod profile;
 pub mod runner;
 pub mod shadow;
 pub mod sha256;

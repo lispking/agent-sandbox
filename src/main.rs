@@ -5,6 +5,7 @@
 //!   cargo run
 
 use agent_sandbox::audit::{self, AuditLog, Event};
+use agent_sandbox::profile::{Grant, Profile, Registry};
 use agent_sandbox::runner::{run_bounded, Budget};
 use agent_sandbox::shadow;
 use agent_sandbox::sha256::sha256_hex;
@@ -38,6 +39,14 @@ fn sample_actions() -> Vec<Action> {
         Action::Read("/Users/king/.ssh/id_rsa".into()),
         Action::Read("/Users/king/.ssh/id_rsa".into()),
     ]
+}
+
+fn kind_of(d: &Decision) -> &'static str {
+    match d {
+        Decision::Allow => "allow",
+        Decision::Ask(_) => "ask",
+        Decision::Deny(_) => "deny",
+    }
 }
 
 fn main() {
@@ -151,6 +160,78 @@ fn main() {
         println!("  按动作类型: {} × {}", kind, count);
     }
     println!("  结论: {}", summary.verdict());
+
+    // ---- 权限从哪来：任务类型 → 模板 → Grant ----
+    // 业务侧登记模板，Agent 只能拿到只读的 Grant，没有任何接口能改能力集。
+    let base = Caps::workspace("/tmp/ws", "/tmp/ws");
+    let danger = base.danger_args.clone(); // 子任务不能把父任务的审批项删掉
+
+    let registry = Registry::new(vec![
+        Profile::new("platform", base.clone()),
+        Profile::new(
+            "refund-ticket",
+            Caps {
+                read_roots: vec![PathBuf::from("/tmp/ws/orders")],
+                write_roots: vec![PathBuf::from("/tmp/ws/refund")],
+                exec_allow: vec!["git".into()],
+                danger_args: danger.clone(),
+                net_allow: vec![],
+            },
+        ),
+        Profile::new(
+            "doc-task",
+            Caps {
+                read_roots: vec![PathBuf::from("/tmp/ws/docs")],
+                write_roots: vec![],
+                exec_allow: vec![],
+                danger_args: danger.clone(),
+                net_allow: vec![],
+            },
+        ),
+    ]);
+
+    println!("\n授权链路（任务类型 → Grant，按单调收窄派生）:");
+    let platform = Grant::issue(registry.resolve("platform").unwrap());
+    println!("  {:<14} {}", "platform", &platform.policy_hash()[..16]);
+
+    let probe = Action::Write("/tmp/ws/other.txt".into());
+    for kind in ["refund-ticket", "doc-task"] {
+        let p = registry.resolve(kind).unwrap();
+        match platform.narrow(p) {
+            Ok(g) => {
+                println!(
+                    "  {:<14} {}  收窄成功",
+                    kind,
+                    &g.policy_hash()[..16]
+                );
+                println!(
+                    "     写 /tmp/ws/other.txt：platform={} → {}={}",
+                    kind_of(&platform.check(&probe)),
+                    kind,
+                    kind_of(&g.check(&probe))
+                );
+            }
+            Err(v) => println!("  {:<14} 越权: {}", kind, v),
+        }
+    }
+
+    // 越权申请必须报错，而不是静默取交集
+    let overreach = Profile::new(
+        "refund-ticket+",
+        Caps {
+            read_roots: vec![PathBuf::from("/tmp/ws/orders"), PathBuf::from("/etc")],
+            ..base.clone()
+        },
+    );
+    match platform.narrow(&overreach) {
+        Ok(_) => println!("  越权申请居然通过了，这是 bug"),
+        Err(v) => println!("  越权申请被拒: {}", v),
+    }
+
+    match registry.resolve("unknown-task") {
+        Ok(_) => println!("  未登记类型居然通过了，这是 bug"),
+        Err(e) => println!("  未登记类型: {}", e),
+    }
 
     // 执行器：策略允许的动作，才轮到预算来管
     let budget = Budget {
