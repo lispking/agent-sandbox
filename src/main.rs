@@ -6,6 +6,7 @@
 
 use agent_sandbox::audit::{self, AuditLog, Event};
 use agent_sandbox::runner::{run_bounded, Budget};
+use agent_sandbox::shadow;
 use agent_sandbox::sha256::sha256_hex;
 use agent_sandbox::{Action, Caps, Decision, Reversibility};
 use std::path::PathBuf;
@@ -68,7 +69,8 @@ fn main() {
         }
 
         log.append(
-            Event::new("session-42", i as u32 + 1, "planner", &action.to_string(), effect)
+            // 入库存可逆编码：Display 是给人看的，拿去回放会被空格切碎
+            Event::new("session-42", i as u32 + 1, "planner", &action.encode(), effect)
                 .rule(&rule)
                 .risk(&format!("{:?}", rev)),
         )
@@ -93,9 +95,14 @@ fn main() {
     }
 
     // 被拒目标统计：最便宜的策反信号
+    // 分组用的是编码后的形式（机器键，稳定可比），展示时再解码回人话——
+    // 两件事混在一起，就会出现 table 里冒出 \s 这种转义符的情况。
     println!("\n被拒目标（同一目标被拒次数）:");
     for (target, count) in audit::denied_targets(&log_path).unwrap() {
-        println!("  {:>2} 次  {}", count, target);
+        let shown = Action::decode(&target)
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| target.clone());
+        println!("  {:>2} 次  {}", count, shown);
     }
     let hits = audit::suspicious(&log_path, 3).unwrap();
     if hits.is_empty() {
@@ -103,9 +110,47 @@ fn main() {
     } else {
         println!("\n告警: 以下目标被拒达到阈值 3，建议复核是否被注入");
         for (target, count) in hits {
-            println!("  {} 次  {}", count, target);
+            let shown = Action::decode(&target)
+                .map(|a| a.to_string())
+                .unwrap_or(target);
+            println!("  {} 次  {}", count, shown);
         }
     }
+
+    // ---- 灰度：拿刚才这批真实动作，跑一版新策略 ----
+    // 两条改动方向相反：有人要求「工作区不许写」，同时有人要求「放开 curl 调试」。
+    // 这正是灰度要回答的问题：改完之后，谁被误伤了、谁被放宽了。
+    let mut next_caps = Caps::workspace("/tmp/ws", "/tmp/ws");
+    next_caps.write_roots.clear();
+    next_caps.exec_allow.push("curl".into());
+
+    let (changes, summary) =
+        shadow::diff_from_audit(&caps, &next_caps, &log_path).expect("灰度对比失败");
+
+    println!("\n灰度对比（旧策略 → 新策略，基于上面的真实动作）:");
+    if changes.is_empty() {
+        println!("  判定无变化");
+    }
+    for c in &changes {
+        let shown = Action::decode(&c.action)
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| c.action.clone());
+        println!(
+            "  {:<10} {:<44} {} → {}",
+            c.shift.label(),
+            shown,
+            c.old,
+            c.new
+        );
+    }
+    println!(
+        "  合计: 误伤 {} / 放宽 {} / 改判 {} / 不变 {}",
+        summary.tightened, summary.loosened, summary.reclassified, summary.unchanged
+    );
+    for (kind, count) in shadow::group_by_prefix(&changes) {
+        println!("  按动作类型: {} × {}", kind, count);
+    }
+    println!("  结论: {}", summary.verdict());
 
     // 执行器：策略允许的动作，才轮到预算来管
     let budget = Budget {

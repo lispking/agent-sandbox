@@ -38,6 +38,83 @@ impl fmt::Display for Action {
     }
 }
 
+impl Action {
+    /// 可逆编码：给机器回放用。
+    ///
+    /// 和 `Display` 分开是有原因的：`Display` 是给人看的，只要读得懂就行；
+    /// 回放要求「编码后再解码得到等价动作」。两者混用，就会出现
+    /// 「日志能看懂，但拿去跑灰度对比时参数被空格切碎」这种问题。
+    pub fn encode(&self) -> String {
+        match self {
+            Action::Read(p) => format!("read {}", esc(&p.to_string_lossy())),
+            Action::Write(p) => format!("write {}", esc(&p.to_string_lossy())),
+            Action::Delete(p) => format!("delete {}", esc(&p.to_string_lossy())),
+            Action::Exec { program, args } => {
+                let mut s = format!("exec {}", esc(program));
+                for a in args {
+                    s.push(' ');
+                    s.push_str(&esc(a));
+                }
+                s
+            }
+            Action::Net { host } => format!("net {}", esc(host)),
+        }
+    }
+
+    pub fn decode(input: &str) -> Option<Action> {
+        let (kind, rest) = input.split_once(' ')?;
+        match kind {
+            "read" => Some(Action::Read(PathBuf::from(unesc(rest)))),
+            "write" => Some(Action::Write(PathBuf::from(unesc(rest)))),
+            "delete" => Some(Action::Delete(PathBuf::from(unesc(rest)))),
+            "net" => Some(Action::Net { host: unesc(rest) }),
+            "exec" => {
+                let mut it = rest.split(' ').map(unesc);
+                let program = it.next()?;
+                Some(Action::Exec {
+                    program,
+                    args: it.collect(),
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+fn esc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            ' ' => out.push_str("\\s"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn unesc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('s') => out.push(' '),
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 /// 三态，而不是布尔。布尔会逼着实现者把「拿不准」硬塞进 allow 或 deny，
 /// 而实际系统里绝大多数事故发生在「拿不准但放行了」。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,6 +332,7 @@ fn within(path: &Path, roots: &[PathBuf]) -> bool {
 
 pub mod audit;
 pub mod runner;
+pub mod shadow;
 pub mod sha256;
 
 #[cfg(test)]

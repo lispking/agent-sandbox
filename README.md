@@ -14,12 +14,13 @@
 - **路径先归一化**：`Path::starts_with` 是纯词法比较，`..` 和软链接能直接逃逸。比较前必须解软链 + 折叠。
 - **可逆性单独分级**：删除、push、publish 不可逆，一律 `Ask`，不给任何「自动」的机会。
 - **预算即边界**：超时 kill、输出边读边截（截断后不能停止读取，否则管道写满变成死锁）。
+- **可回放**：审计入库的是可逆编码（`Action::encode`），所以能拿昨天的真实动作跑今天的新策略，做灰度对比。`Display` 只给人看，不参与回放。
 
 ## 快速开始
 
 ```bash
-cargo test      # 25 个测试：路径逃逸、解释器后门、超时终止、输出截断、链式审计篡改检测
-cargo run       # 把一批真实形状的调用丢进策略层，同时写审计并按被拒目标告警
+cargo test      # 33 个测试：路径逃逸、解释器后门、超时终止、输出截断、链式审计篡改检测、编解码回环、灰度差异分类
+cargo run       # 判定 + 写审计 + 独立校验 + 被拒告警 + 两版策略灰度对比
 ```
 
 输出示例：
@@ -44,6 +45,7 @@ ASK          exec git push --force origin main            Irreversible
 src/lib.rs       动作模型、能力集、判定、路径归一化
 src/runner.rs    预算执行器：超时 / 输出上限 / 进程组
 src/audit.rs     链式审计：哈希链、独立校验、被拒目标统计
+src/shadow.rs    灰度对比：两版能力集跑同一批历史动作，分类误伤与放宽
 src/sha256.rs    零依赖 SHA-256（带官方测试向量）
 src/main.rs      演示入口
 diagrams/        文章配图的 SVG 源
@@ -74,6 +76,33 @@ assert!(matches!(audit::verify("tampered.tsv"), Err(Tamper::HashMismatch { line:
 ```
 
 **局限要说清楚**：哈希不是签名。它能发现「有人顺手改了日志」，但挡不住有写权限的人重算整条链；真正的防篡改要把每天的链头写到外部存储（或者做签名/公证）。
+
+## 灰度：改规则之前，先问「会误伤谁」
+
+策略改动没法靠单元测试验证——测试里的动作是人挑的，真实流量里的动作是模型生成的。唯一靠谱的办法是**拿昨天的真实动作跑今天的新策略**，看判定差异。
+
+这也解释了为什么审计必须存可逆编码：`Display` 是给人看的（参数里的空格原样输出），回放时会切碎；`encode()` / `decode()` 才保证「存进去什么，取出来还是什么」。
+
+四个分类，只有第一个必须人工逐条看：
+
+| 分类 | 判定变化 | 含义 |
+|---|---|---|
+| 误伤候选 | allow → ask / deny | 正常任务会被打回去，必须逐条确认 |
+| 放宽 | ask / deny → allow | 有动作从「不放行」变成「放行」，确认是谁要的 |
+| 改判 | deny ↔ ask | 判定变了但没跨到允许，通常可接受 |
+| 不变 | — | 不影响 |
+
+```rust
+let mut next = Caps::workspace("/tmp/ws", "/tmp/ws");
+next.write_roots.clear();               // 有人要求工作区只读
+next.exec_allow.push("curl".into());    // 同时有人要求放开 curl
+
+let (changes, summary) = shadow::diff_from_audit(&old, &next, "audit.tsv")?;
+println!("误伤 {} / 放宽 {}", summary.tightened, summary.loosened);
+println!("结论: {}", summary.verdict());
+```
+
+`diff_from_audit` 会先对动作去重——同一个目标在日志里可能出现上百次，不去重的话输出没法读。
 
 ## 边界与局限（重要）
 
