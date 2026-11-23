@@ -18,8 +18,8 @@
 ## 快速开始
 
 ```bash
-cargo test      # 15 个测试：路径逃逸、解释器后门、超时终止、输出截断
-cargo run       # 把一批真实形状的调用丢进策略层，看它怎么判
+cargo test      # 25 个测试：路径逃逸、解释器后门、超时终止、输出截断、链式审计篡改检测
+cargo run       # 把一批真实形状的调用丢进策略层，同时写审计并按被拒目标告警
 ```
 
 输出示例：
@@ -43,9 +43,37 @@ ASK          exec git push --force origin main            Irreversible
 ```text
 src/lib.rs       动作模型、能力集、判定、路径归一化
 src/runner.rs    预算执行器：超时 / 输出上限 / 进程组
+src/audit.rs     链式审计：哈希链、独立校验、被拒目标统计
+src/sha256.rs    零依赖 SHA-256（带官方测试向量）
 src/main.rs      演示入口
 diagrams/        文章配图的 SVG 源
 ```
+
+## 审计：让「这份日志没被动过」可被验证
+
+审计日志的价值不在「有记录」，而在能回答四个问题：这件事**做没做过**、是**哪一步**做的、当时**为什么允许**、现在还能不能**重放那一幕**。
+
+对应的四个字段组：
+
+- **身份**：`session` + `step` + `actor` —— 光有时间戳不够，同一秒内的先后顺序要靠单调 `seq`
+- **意图**：归一化之后的 `action` —— 记原始字符串等于没记
+- **决策**：`effect` + `rule` + `policy_hash` —— 策略版本必须一起记，否则半年后无法解释「当时为什么允许」
+- **结果**：`duration_ms` + `exit_code`
+
+被拒绝的动作**也要落库**。这是策反检测最便宜的信号：正常任务是偶尔被拒，被注入的 Agent 会对着同一个目标反复换写法。
+
+防篡改用的是哈希链：每条记录的 `hash = SHA-256(本条字段 + prev_hash)`，`verify()` 只依赖文件里的字节，可以交给审计方单独跑，而不是让写日志的进程自证。改一条、删一条、重排一条，都会在 `verify()` 里定位到具体行号。
+
+```rust
+let mut log = AuditLog::open("audit.tsv", &policy_hash)?;
+log.append(Event::new("session-42", 1, "planner", "read /etc/passwd", "deny")
+    .rule("读路径越界"))?;
+
+assert_eq!(audit::verify("audit.tsv")?, 1);              // 链完整
+assert!(matches!(audit::verify("tampered.tsv"), Err(Tamper::HashMismatch { line: 2 })));
+```
+
+**局限要说清楚**：哈希不是签名。它能发现「有人顺手改了日志」，但挡不住有写权限的人重算整条链；真正的防篡改要把每天的链头写到外部存储（或者做签名/公证）。
 
 ## 边界与局限（重要）
 

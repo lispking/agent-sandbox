@@ -253,7 +253,9 @@ fn within(path: &Path, roots: &[PathBuf]) -> bool {
     })
 }
 
+pub mod audit;
 pub mod runner;
+pub mod sha256;
 
 #[cfg(test)]
 mod tests {
