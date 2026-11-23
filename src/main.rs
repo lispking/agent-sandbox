@@ -4,6 +4,7 @@
 //! 用法：
 //!   cargo run
 
+use agent_sandbox::approvals::{self, Submit};
 use agent_sandbox::audit::{self, AuditLog, Event};
 use agent_sandbox::profile::{Grant, Profile, Registry};
 use agent_sandbox::runner::{run_bounded, Budget};
@@ -231,6 +232,42 @@ fn main() {
     match registry.resolve("unknown-task") {
         Ok(_) => println!("  未登记类型居然通过了，这是 bug"),
         Err(e) => println!("  未登记类型: {}", e),
+    }
+
+    // ---- 人工确认：进队列、去重、复用、超时降级 ----
+    println!("\n人工确认队列（Ask 是成本，不是安全措施）:");
+    let mut queue = approvals::Queue::new(60_000, 300_000); // TTL 60s，复用窗口 5 分钟
+
+    let r1 = queue.submit("delete /tmp/ws/target", "删除不可逆", 0);
+    let r2 = queue.submit("delete /tmp/ws/target", "删除不可逆", 500);
+    let r3 = queue.submit("exec git push --force origin main", "命中危险参数", 600);
+    println!("  提交 delete /tmp/ws/target        → {:?}", r1);
+    println!("  再提交同一目标                     → {:?}", r2);
+    println!("  提交 exec git push --force         → {:?}", r3);
+
+    if let Submit::Enqueued(id) = r1 {
+        if let Some(d) = queue.approve(id, "king", 1_000) {
+            println!("  批准 #{}（by {}）", id, d.by);
+        }
+    }
+
+    match queue.submit("delete /tmp/ws/target", "删除不可逆", 200_000) {
+        Submit::Reused { approved, by } => {
+            println!("  4 分钟后再提同一目标 → 复用决策（批准={}, by {}）", approved, by)
+        }
+        other => println!("  {:?}", other),
+    }
+
+    let expired = queue.expire(70_000);
+    println!("  超时降级为拒绝: {} 条", expired.len());
+
+    let m = queue.metrics();
+    println!(
+        "  指标: 提交 {} / 入队 {} / 去重 {} / 复用 {} / 超时 {}",
+        m.submitted, m.enqueued, m.deduped, m.reused, m.expired
+    );
+    if let Some((target, count)) = m.top_targets.first() {
+        println!("  被问最多: {} × {}（这一类应该被规则或模板吸收）", target, count);
     }
 
     // 执行器：策略允许的动作，才轮到预算来管
