@@ -54,7 +54,6 @@ src/approvals.rs 人工确认队列：去重、决策复用窗口、超时降级
 src/guard.rs     门面：一次调用跑完五层，两阶段记录 + 幂等 + 幽灵检测
 src/sha256.rs    零依赖 SHA-256（带官方测试向量）
 src/main.rs      演示入口
-diagrams/        文章配图的 SVG 源
 ```
 
 ## 审计：让「这份日志没被动过」可被验证
