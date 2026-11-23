@@ -338,6 +338,7 @@ fn within(path: &Path, roots: &[PathBuf]) -> bool {
 
 pub mod approvals;
 pub mod audit;
+pub mod guard;
 pub mod profile;
 pub mod runner;
 pub mod shadow;

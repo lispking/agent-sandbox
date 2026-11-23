@@ -6,6 +6,7 @@
 
 use agent_sandbox::approvals::{self, Submit};
 use agent_sandbox::audit::{self, AuditLog, Event};
+use agent_sandbox::guard;
 use agent_sandbox::profile::{Grant, Profile, Registry};
 use agent_sandbox::runner::{run_bounded, Budget};
 use agent_sandbox::shadow;
@@ -269,6 +270,46 @@ fn main() {
     if let Some((target, count)) = m.top_targets.first() {
         println!("  被问最多: {} × {}（这一类应该被规则或模板吸收）", target, count);
     }
+
+    // ---- 门面：一次调用跑完五层，留下两阶段记录 ----
+    println!("\n门面 Guard（判定 → 审计意图 → 执行 → 审计结果）:");
+    let guard_path = std::env::temp_dir().join("agent-sandbox-guard-demo.tsv");
+    let _ = std::fs::remove_file(&guard_path);
+
+    let budget = Budget {
+        timeout_ms: 2_000,
+        max_output_bytes: 2048,
+    };
+    let mut g = guard::Guard::open(&guard_path, platform.clone(), budget).expect("打开门面失败");
+
+    let read = Action::Read("/tmp/ws/src/main.rs".into());
+    for attempt in 1..=2 {
+        let r = g
+            .act("session-42", 1, &read, |b| {
+                run_bounded("echo", &["hello".into()], *b)
+            })
+            .expect("act 失败");
+        println!(
+            "  第 {} 次读取同一动作 → decision={} ran={} replayed={}",
+            attempt, r.decision, r.ran, r.replayed
+        );
+    }
+
+    let denied = g
+        .act(
+            "session-42",
+            2,
+            &Action::Read("/etc/passwd".into()),
+            |_| panic!("被拒绝的动作不应被执行"),
+        )
+        .expect("act 失败");
+    println!(
+        "  越界读取 → decision={} ran={}",
+        denied.decision, denied.ran
+    );
+
+    println!("  审计记录数: {}", g.seq());
+    println!("  {}", guard::ghost_report(&guard_path).expect("读取幽灵报告失败"));
 
     // 执行器：策略允许的动作，才轮到预算来管
     let budget = Budget {
