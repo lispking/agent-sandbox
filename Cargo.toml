@@ -1,0 +1,12 @@
+[package]
+name = "agent-sandbox"
+version = "0.1.0"
+edition = "2021"
+description = "A minimal action gate for AI agents: capability sets, path confinement, reversibility grading, audit trail"
+license = "MIT"
+
+[dependencies]
+
+[[bin]]
+name = "sandbox-demo"
+path = "src/main.rs"
